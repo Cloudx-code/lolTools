@@ -4,10 +4,12 @@ import (
 	"MyLOLassisitant/consts"
 	"MyLOLassisitant/models"
 	"MyLOLassisitant/myLogs"
+	"MyLOLassisitant/utils"
 	"bytes"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/gorilla/websocket"
 	"io"
@@ -20,7 +22,7 @@ import (
 	"time"
 )
 
-type LolClient struct {
+type LolHelper struct {
 	port  int
 	token string
 
@@ -28,22 +30,71 @@ type LolClient struct {
 	baseUrl string
 }
 
-func NewLolCilent(port int, token string) *LolClient {
-	return &LolClient{
-		port:  port,
-		token: token,
-		client: &http.Client{
-			Transport: &http.Transport{
-				ForceAttemptHTTP2: true,                                  //使用http2.0
-				TLSClientConfig:   &tls.Config{InsecureSkipVerify: true}, //不去验证服务端的数字证书
-			},
-		},
-		baseUrl: fmt.Sprintf(consts.BaseUrlTokenPortTemplate, token, port),
+func NewLolHelper() *LolHelper {
+	return &LolHelper{}
+}
+
+func (l *LolHelper) Run() error {
+	// 1.获取token,port
+	err := l.initParams()
+	if err != nil {
+		myLogs.Println("fail to initParams,err:", err)
+		return err
 	}
+	myLogs.Println("port,token after initParams :", l.port, l.token)
+
+	// 2.连接lcu
+	conn, err := l.Conn2LCU()
+	if err != nil {
+		myLogs.Println("fail to ConnLcu,err:", err)
+		return err
+	}
+
+	// 3.接收lcu消息
+	err = l.Start(conn)
+	if err != nil {
+		myLogs.Println("fail to MonitorGame,err:", err)
+		return err
+	}
+	return nil
+}
+
+// 根据lol进程获取端口和token
+func (l *LolHelper) initParams() error {
+	var port int
+	var token string
+	var err error
+	// 1.获取token,port信息
+	err = utils.Retry(consts.TryTimes, 10*time.Millisecond, func() error {
+		port, token, err = GetLolClientPortToken()
+		if err != nil {
+			if !errors.Is(consts.ErrLolProcessNotFound, err) {
+				//如果不是因为没有找到lol进程的错误,那就记录下来
+				myLogs.Println("fail to GetLolClientPortToken,获取port token 失败,err:", err)
+			}
+			myLogs.Println("获取port，token，尝试失败")
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	// 2.LolHelper成员赋值
+	l.token = token
+	l.port = port
+	l.client = &http.Client{
+		Transport: &http.Transport{
+			ForceAttemptHTTP2: true,                                  //使用http2.0
+			TLSClientConfig:   &tls.Config{InsecureSkipVerify: true}, //不去验证服务端的数字证书
+		},
+	}
+	l.baseUrl = fmt.Sprintf(consts.BaseUrlTokenPortTemplate, token, port)
+	return nil
 }
 
 // Conn2LCU 连接到lcu
-func (l *LolClient) Conn2LCU() (*websocket.Conn, error) {
+func (l *LolHelper) Conn2LCU() (*websocket.Conn, error) {
 	//跳过证书检测
 	dialer := websocket.DefaultDialer
 	dialer.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
@@ -69,8 +120,8 @@ func (l *LolClient) Conn2LCU() (*websocket.Conn, error) {
 	return conn, nil
 }
 
-// Run 监听Lcu消息,下面就开始接收lcu发来的消息, 一切动作(开始匹配,回到大厅等消息都会发过来)
-func (l *LolClient) Run(conn *websocket.Conn) error {
+// Start 监听Lcu消息,下面就开始接收lcu发来的消息, 一切动作(开始匹配,回到大厅等消息都会发过来)
+func (l *LolHelper) Start(conn *websocket.Conn) error {
 	myLogs.Println("start receive lol msg\n")
 	for {
 		// 监听消息
@@ -86,6 +137,7 @@ func (l *LolClient) Run(conn *websocket.Conn) error {
 		}
 
 		wsMsg := &models.WsMsg{}
+		// todo 此处待改进
 		err = json.Unmarshal(msg[consts.OnJsonApiEventPrefixLen:len(msg)-1], wsMsg)
 		if err != nil {
 			myLogs.Printf("fail to json.Unmarshal(msg[consts.OnJsonApiEventPrefixLen:len(msg)-1], wsMsg),err:%v", err)
@@ -107,7 +159,7 @@ func (l *LolClient) Run(conn *websocket.Conn) error {
 }
 
 //ChampionSelectStart 英雄选择阶段
-func (l *LolClient) ChampionSelectStart() error {
+func (l *LolHelper) ChampionSelectStart() error {
 	time.Sleep(time.Second) //开始睡一会,因为服务端没那么快更新数据
 	// 1、获取对战房间id
 	roomId, err := l.GetRoomId()
@@ -165,7 +217,7 @@ type datatest struct { //发送消息时,服务端指定格式的数据
 }
 
 // SendConversationMsg 根据房间id发送消息
-func (l *LolClient) SendConversationMsg(msg interface{}, roomId string) error {
+func (l *LolHelper) SendConversationMsg(msg interface{}, roomId string) error {
 	TempByte, _ := json.Marshal(msg)
 	data := datatest{
 		Body: string(TempByte),
@@ -232,7 +284,7 @@ func (l *LolClient) SendConversationMsg(msg interface{}, roomId string) error {
 }
 
 // 根据召唤师id计算得分
-func (l *LolClient) CalUserScoreById(summonerId int64) (models.UserScore, error) {
+func (l *LolHelper) CalUserScoreById(summonerId int64) (models.UserScore, error) {
 	userScoreInfo := &models.UserScore{
 		SummonerID: summonerId,
 		Score:      10,
@@ -282,7 +334,7 @@ func CalSocre(gameList []models.GameInfo) float64 {
 	return (float64(killNums) + float64(assistNums)) / float64(deathNums) * 3
 }
 
-func (l *LolClient) listGameHistory(summonerId int64) ([]models.GameInfo, error) {
+func (l *LolHelper) listGameHistory(summonerId int64) ([]models.GameInfo, error) {
 	fmtList := make([]models.GameInfo, 0, 7)
 	//超过7把战绩就别存了
 	resp, err := l.ListGamesBySummonerID(summonerId, 0, 7)
@@ -305,7 +357,7 @@ func (l *LolClient) listGameHistory(summonerId int64) ([]models.GameInfo, error)
 }
 
 // ListGamesBySummonerID 根据召唤师id,查询最近[begin,begin+limit-1]的游戏战绩
-func (l *LolClient) ListGamesBySummonerID(summonerId int64, begin, limit int) (*models.GameListResp, error) {
+func (l *LolHelper) ListGamesBySummonerID(summonerId int64, begin, limit int) (*models.GameListResp, error) {
 	bts, err := l.GetReq(fmt.Sprintf("/lol-match-history/v3/matchlist/account/%d?begIndex=%d&endIndex=%d",
 		summonerId, begin, begin+limit))
 	if err != nil {
@@ -317,7 +369,7 @@ func (l *LolClient) ListGamesBySummonerID(summonerId int64, begin, limit int) (*
 }
 
 // GetSummonerInfoById 根据召唤师id查找召唤师的完整信息
-func (l *LolClient) GetSummonerInfoById(id int64) (*models.SummonerInfo, error) {
+func (l *LolHelper) GetSummonerInfoById(id int64) (*models.SummonerInfo, error) {
 	summonerInfo := make([]*models.SummonerInfo, 1)
 	msg, err := l.GetReq(fmt.Sprintf(consts.GetSummonerInfoTemplate, id))
 	if err != nil {
@@ -334,7 +386,7 @@ func (l *LolClient) GetSummonerInfoById(id int64) (*models.SummonerInfo, error) 
 }
 
 // GetSummonerListByRoomId 通过聊天房间ID,查出聊天记录,从中找到5个召唤师的id值
-func (l *LolClient) GetSummonerInfoListByRoomId(roomId string) ([]int64, error) {
+func (l *LolHelper) GetSummonerInfoListByRoomId(roomId string) ([]int64, error) {
 	msg, err := l.GetReq(fmt.Sprintf(consts.GetSummonerInfoByRoomIdTemplate, roomId)) //得到这个房间内的所有消息
 	if err != nil {
 		myLogs.Println("fail to getSummonerInfoListByRoomId getReq,err:", err)
@@ -357,7 +409,7 @@ func (l *LolClient) GetSummonerInfoListByRoomId(roomId string) ([]int64, error) 
 }
 
 // GetRoomId 获取当前对战聊天房间的ID
-func (l *LolClient) GetRoomId() (string, error) {
+func (l *LolHelper) GetRoomId() (string, error) {
 	msg, err := l.GetReq(consts.GetRoomId)
 	if err != nil {
 		myLogs.Println("fail to GetRoomId,err:", err)
@@ -379,7 +431,7 @@ func (l *LolClient) GetRoomId() (string, error) {
 	return "", nil
 }
 
-func (l *LolClient) GetReq(url string) ([]byte, error) {
+func (l *LolHelper) GetReq(url string) ([]byte, error) {
 	fmt.Printf("http,get : cli+url = %v\n", l.baseUrl+url)
 	myLogs.Printf("http,get : cli+url = %v\n", l.baseUrl+url)
 	req, _ := http.NewRequest(http.MethodGet, l.baseUrl+url, nil)
@@ -395,7 +447,7 @@ func (l *LolClient) GetReq(url string) ([]byte, error) {
 	return io.ReadAll(resp.Body)
 }
 
-func (l *LolClient) PostReq(url string, data interface{}) ([]byte, error) {
+func (l *LolHelper) PostReq(url string, data interface{}) ([]byte, error) {
 	fmt.Printf("http,post : cli+url = %v\n", l.baseUrl+url)
 	fmt.Printf("data.body %v\n", data.(datatest).Body)
 	fmt.Printf("data.type %v\n", data.(datatest).Type)

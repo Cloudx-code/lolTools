@@ -4,6 +4,7 @@ import (
 	"MyLOLassisitant/consts"
 	"fmt"
 	"os"
+	"time"
 )
 
 var fs *os.File
@@ -30,12 +31,12 @@ func Println(a ...interface{}) {
 }
 
 func saveLogsInfo(info string) {
-	//logInfo := fmt.Sprintf("%v:%v\n", time.Now().Format("2006-01-02 15:04:05"), info)
-	//_, err := fs.WriteString(logInfo)
-	//if err != nil {
-	//	fmt.Println("fail to saveLogsInfo,err:", err)
-	//	return
-	//}
+	logInfo := fmt.Sprintf("%v:%v\n", time.Now().Format("2006-01-02 15:04:05"), info)
+	_, err := fs.WriteString(logInfo)
+	if err != nil {
+		fmt.Println("fail to saveLogsInfo,err:", err)
+		return
+	}
 }
 
 func CloseLogFile() {
